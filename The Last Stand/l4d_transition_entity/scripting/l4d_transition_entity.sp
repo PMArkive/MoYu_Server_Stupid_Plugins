@@ -2,11 +2,12 @@
 #pragma newdecls required
 
 #define DEBUG 0
-#define PLUGIN_VERSION "2.0"
+#define PLUGIN_VERSION "2.1"
 
 #include <sourcemod>
 #include <dhooks>
 #include <sdktools>
+#include <sdkhooks>
 #include <sourcescramble>
 #include <@Forgetest/gamedatawrapper>
 
@@ -67,12 +68,15 @@ CUtlVector g_SavedWeaponSpawns;		// (L4D1) CUtlVector<SavedEntity> / (L4D2) CUtl
 
 DynamicHook g_hook_PostSpawn;
 
+GlobalForward g_fwdOnBeginSaveEntities;
+GlobalForward g_fwdOnEntitySaveable;
 GlobalForward g_fwdOnEntityTransitioning;
 GlobalForward g_fwdOnEntityTransitioned;
 GlobalForward g_fwdOnPlayerTransitioning;
 GlobalForward g_fwdOnPlayerTransitioned;
 GlobalForward g_fwdOnPlayerItemTransitioning;
 GlobalForward g_fwdOnPlayerItemTransitioned;
+GlobalForward g_fwdOnPlayerItemTransitionSpawned;
 
 bool g_bL4D2;
 ArrayList g_HookIDs;
@@ -90,12 +94,15 @@ public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max
 		}
 	}
 
+	g_fwdOnBeginSaveEntities = new GlobalForward("L4D_OnBeginSaveEntities", ET_Ignore, Param_Cell);
+	g_fwdOnEntitySaveable = new GlobalForward("L4D_OnEntitySaveable", ET_Event, Param_Cell, Param_CellByRef);
 	g_fwdOnEntityTransitioning = new GlobalForward("L4D_OnEntityTransitioning", ET_Ignore, Param_Cell);
 	g_fwdOnEntityTransitioned = new GlobalForward("L4D_OnEntityTransitioned", ET_Ignore, Param_Cell, Param_Cell);
 	g_fwdOnPlayerTransitioning = new GlobalForward("L4D_OnPlayerTransitioning", ET_Ignore, Param_Cell);
 	g_fwdOnPlayerTransitioned = new GlobalForward("L4D_OnPlayerTransitioned", ET_Ignore, Param_Cell, Param_Cell, Param_Cell);
 	g_fwdOnPlayerItemTransitioning = new GlobalForward("L4D_OnPlayerItemTransitioning", ET_Ignore, Param_Cell, Param_Cell);
 	g_fwdOnPlayerItemTransitioned = new GlobalForward("L4D_OnPlayerItemTransitioned", ET_Ignore, Param_Cell, Param_Cell, Param_Cell);
+	g_fwdOnPlayerItemTransitionSpawned = new GlobalForward("L4D_OnPlayerItemTransitionSpawned", ET_Ignore, Param_Cell, Param_Cell, Param_Cell);
 
 	RegPluginLibrary("l4d_transition_entity");
 
@@ -262,6 +269,16 @@ void ClearHookIDs()
 	g_HookIDs.Clear();
 }
 
+void CallOnBeginSaveEntities(int info_changelevel)
+{
+	if (g_fwdOnEntityTransitioned.FunctionCount == 0)
+		return;
+	
+	Call_StartForward(g_fwdOnBeginSaveEntities);
+	Call_PushCell(info_changelevel);
+	Call_Finish();
+}
+
 static int g_iLastEntity;
 static int g_iLastPhysicProps;
 static int g_iLastWeapons;
@@ -273,6 +290,7 @@ MRESReturn DTR_SaveEntities(int entity, DHookParam hParams)
 	g_iLastWeapons = 0;
 	g_iLastWeaponSpawns = 0;
 	ClearHookIDs();
+	CallOnBeginSaveEntities(entity);
 	return MRES_Ignored;
 }
 
@@ -323,11 +341,45 @@ void CheckLastSavedEntity(int entity)
 	OnSavingEntity(entity, pKV);
 }
 
+bool CallOnEntitySaveable(int entity, bool &save)
+{
+	if (g_fwdOnEntitySaveable.FunctionCount == 0)
+		return false;
+	
+	bool save_ = save;
+	Action result = Plugin_Continue;
+
+	Call_StartForward(g_fwdOnEntitySaveable);
+	Call_PushCell(entity);
+	Call_PushCellRef(save_);
+	Call_Finish(result);
+	
+	if (result == Plugin_Changed)
+	{
+		save = save_ != false;
+		return true;
+	}
+
+	return false;
+}
+
 MRESReturn DTR_IsEntitySaveable_Post(int entity, DHookReturn hReturn, DHookParam hParams)
 {
 	CheckLastSavedEntity(g_iLastEntity);
-	g_iLastEntity = hReturn.Value == true ? hParams.Get(1) : -1;
-	
+
+	bool save = hReturn.Value == true;
+	if (CallOnEntitySaveable(entity, save))
+	{
+		g_iLastEntity = save ? hParams.Get(1) : -1;
+
+		hReturn.Value = save;
+		return MRES_Override;
+	}
+	else
+	{
+		g_iLastEntity = hReturn.Value == true ? hParams.Get(1) : -1;
+	}
+
 	return MRES_Ignored;
 }
 
@@ -443,6 +495,8 @@ MRESReturn DTR_PlayerSaveData_Post(Address pThis, DHookParam hParams)
 }
 
 static bool g_bRestorePlayerData = false;
+static bool g_bGivePlayerItem = false;
+static int g_iCurRestorePlayer = -1;
 static int g_iPlayerItemOldIndex = -1;
 static int g_iPlayerLastSecondaryOldIndex = -1;
 static ArrayList g_RestoredPlayerItem = null;
@@ -453,6 +507,7 @@ MRESReturn DTR_PlayerSaveData_Restore(Address pThis, DHookParam hParams)
 		return MRES_Ignored;
 
 	g_bRestorePlayerData = true;
+	g_iCurRestorePlayer = hParams.Get(1);
 	g_iPlayerItemOldIndex = -1;
 	g_iPlayerLastSecondaryOldIndex = pKV.GetInt("l4d_transition_entity_oldsecondary", -1);
 
@@ -468,6 +523,8 @@ MRESReturn DTR_GiveNamedItem(int client, DHookReturn hReturn, DHookParam hParams
 {
 	if (!g_bRestorePlayerData)
 		return MRES_Ignored;
+
+	g_bGivePlayerItem = true;
 
 	int reloaded = hParams.Get(2);
 	int oldindex = (reloaded >> 8) & MAX_EDICT_MASK;
@@ -491,30 +548,63 @@ MRESReturn DTR_GiveNamedItem(int client, DHookReturn hReturn, DHookParam hParams
 	return MRES_ChangedHandled;
 }
 
-MRESReturn DTR_GiveNamedItem_Post(int client, DHookReturn hReturn, DHookParam hParams)
+public void OnEntityCreated(int entity, const char[] classname)
 {
-	if (!g_bRestorePlayerData)
-		return MRES_Ignored;
-	
-	int weapon = hReturn.Value;
-	if (weapon == -1)
-		return MRES_Ignored;
-	
+	if (g_bGivePlayerItem)
+	{
+		// Only catches once, otherwise there might be something unexpected when player equips the item
+		g_bGivePlayerItem = false;
+		SDKHook(entity, SDKHook_SpawnPost, GiveNamedItem_SpawnPost);
+	}
+}
+
+void GiveNamedItem_SpawnPost(int entity)
+{
 	#if DEBUG
 	{
 		char classname[64];
-		GetEntityClassname(weapon, classname, sizeof(classname));
-		PrintToServer("GiveNamedItem_Post (%s) [oldindex #%d]", classname, g_iPlayerItemOldIndex);
+		GetEntityClassname(entity, classname, sizeof(classname));
+		PrintToServer("GiveNamedItem_SpawnPost (%s) [oldindex #%d]", classname, g_iPlayerItemOldIndex);
 	}
 	#endif
 
 	if (g_iPlayerItemOldIndex != -1)
 	{
 		int set[2];
-		set[0] = EntIndexToEntRef(weapon);
+		set[0] = EntIndexToEntRef(entity);
 		set[1] = g_iPlayerItemOldIndex;
 		g_RestoredPlayerItem.PushArray(set);
+
+		CallOnPlayerItemSpawned(g_iCurRestorePlayer, entity, g_iPlayerItemOldIndex);
 	}
+}
+
+MRESReturn DTR_GiveNamedItem_Post(int client, DHookReturn hReturn, DHookParam hParams)
+{
+	if (!g_bRestorePlayerData)
+		return MRES_Ignored;
+	
+	g_bGivePlayerItem = false;
+	
+	// int weapon = hReturn.Value;
+	// if (weapon == -1)
+	// 	return MRES_Ignored;
+	
+	// #if DEBUG
+	// {
+	// 	char classname[64];
+	// 	GetEntityClassname(weapon, classname, sizeof(classname));
+	// 	PrintToServer("DTR_GiveNamedItem_Post (%s) [oldindex #%d]", classname, g_iPlayerItemOldIndex);
+	// }
+	// #endif
+
+	// if (g_iPlayerItemOldIndex != -1)
+	// {
+	// 	int set[2];
+	// 	set[0] = EntIndexToEntRef(weapon);
+	// 	set[1] = g_iPlayerItemOldIndex;
+	// 	g_RestoredPlayerItem.PushArray(set);
+	// }
 
 	return MRES_Ignored;
 }
@@ -522,6 +612,7 @@ MRESReturn DTR_GiveNamedItem_Post(int client, DHookReturn hReturn, DHookParam hP
 MRESReturn DTR_PlayerSaveData_Restore_Post(Address pThis, DHookParam hParams)
 {
 	g_bRestorePlayerData = false;
+	g_iCurRestorePlayer = -1;
 
 	if (hParams.IsNull(1))
 		return MRES_Ignored;
@@ -599,6 +690,18 @@ void CallOnPlayerItemTransitioned(int client, int weapon, int oldindex)
 		return;
 	
 	Call_StartForward(g_fwdOnPlayerItemTransitioned);
+	Call_PushCell(client);
+	Call_PushCell(weapon);
+	Call_PushCell(oldindex);
+	Call_Finish();
+}
+
+void CallOnPlayerItemSpawned(int client, int weapon, int oldindex)
+{
+	if (g_fwdOnPlayerItemTransitionSpawned.FunctionCount == 0)
+		return;
+	
+	Call_StartForward(g_fwdOnPlayerItemTransitionSpawned);
 	Call_PushCell(client);
 	Call_PushCell(weapon);
 	Call_PushCell(oldindex);
