@@ -1,0 +1,34 @@
+"Games"
+{
+	"left4dead2"
+	{
+		"Functions"
+		{
+			"l4d2_fix_getup_shove::CTerrorWeapon::CanDeployFor"
+			{
+				"signature"		"CTerrorWeapon::CanDeployFor"
+				"callconv"		"thiscall"
+				"return"		"bool"
+				"this"			"entity"
+				"arguments"
+				{
+					"CTerrorPlayer"
+					{
+						"type"	"cbaseentity"
+					}
+				}
+			}
+		}
+
+		"Signatures"
+		{
+			"CTerrorWeapon::CanDeployFor"
+			{
+				"library"	"server"
+				"linux"		"@_ZN13CTerrorWeapon12CanDeployForEP13CTerrorPlayer"
+				"windows"	"\x2A\x2A\x2A\x2A\x2A\x2A\x2A\x57\x8B\xF9\x85\xF6\x0F\x84\x2A\x2A\x2A\x2A\x8B\x06\x8B\x90\xE4\x07\x00\x00"
+							/* ? ? ? ? ? ? ? 57 8B F9 85 F6 0F 84 ? ? ? ? 8B 06 8B 90 E4 07 00 00 */
+			}
+		}
+	}
+}
